@@ -31,12 +31,18 @@ void SPH::init(SPHConfig config, const std::vector<Particle>& particles)
     const uint32_t threadCount = std::min<uint32_t>(
         std::max(1u, std::thread::hardware_concurrency()), static_cast<uint32_t>(n));
     _threads.resize(threadCount);
+    _barrier = std::make_unique<std::barrier<>>(threadCount);
 
     const float smoothingRadius = _config.smoothingRadius;
     K_SpikyPow2 = 15.0f / (2.0f * PI * std::pow(smoothingRadius, 5));
     K_SpikyPow3 = 15.0f / (PI * std::pow(smoothingRadius, 6));
     K_SpikyPow2Grad = 15.0f / (PI * std::pow(smoothingRadius, 5));
     K_SpikyPow3Grad = 45.0f / (PI * std::pow(smoothingRadius, 6));
+}
+
+SPH::~SPH()
+{
+    _running = false;
 }
 
 // Offsets for the 3x3x3 neighborhood around a cell (including the cell itself).
@@ -148,67 +154,65 @@ void SPH::step(float dt)
 {
     const size_t threadCount = _threads.size();
     const size_t chunk = (_particles.size() + threadCount - 1) / threadCount;
-    _threads.clear();
-
-    // 1) Apply external forces and compute predicted positions.
-    for (size_t t = 0; t < threadCount; ++t) {
-        auto start = _particles.begin() + t * chunk;
-        auto end = std::min(start + chunk, _particles.end());
-        _threads.emplace_back([this, dt, start, end]() { applyExternalForces(dt, start, end); });
-    }
-    for (auto& thread : _threads) {
-        thread.join();
-    }
-
-    // 2) Build spatial hash and reorder particles by cell key for cache-friendly neighbor lookups.
-    buildSpatialHash();
-    reorderParticles();
-
-    // 3) Compute the starting index for each cell key in the sorted list.
-    std::ranges::fill(_offsets, static_cast<uint32_t>(_particles.size()));
-    for (uint32_t i = 0; i < _offsets.size(); ++i) {
-        const uint32_t k = _keys[i];
-        if (_offsets[k] > i)
-            _offsets[k] = i;
-    }
 
     _useViscosity = _config.viscosityStrength != 0.0f;
 
-    // 4) Density -> pressure -> viscosity -> position update (synchronized across threads).
-    std::barrier rendezvous(threadCount);
     _threads.clear();
 
-    for (uint32_t t = 0; t < threadCount; ++t) {
-        const auto start = _particles.begin() + t * chunk;
-        const auto end = std::min(start + chunk, _particles.end());
-        _threads.emplace_back([this, &rendezvous, start, end, dt]() {
-            calculateDensities(start, end);
-            rendezvous.arrive_and_wait();
+    for (size_t t = 0; t < threadCount; ++t) {
+        auto start = _particles.begin() + t * chunk;
+        auto end = std::min(start + chunk, _particles.end());
 
+        _threads.emplace_back([this, start, end, dt]() {
+            // 1) External forces
+            applyExternalForces(dt, start, end);
+            _barrier->arrive_and_wait();
+
+            // 2) Spatial hash & reorder must happen once
+            if (start == _particles.begin()) {
+                buildSpatialHash();
+                reorderParticles();
+
+                std::ranges::fill(_offsets, static_cast<uint32_t>(_particles.size()));
+
+                for (uint32_t i = 0; i < _offsets.size(); ++i) {
+                    const uint32_t k = _keys[i];
+                    if (_offsets[k] > i)
+                        _offsets[k] = i;
+                }
+            }
+
+            _barrier->arrive_and_wait();
+
+            // 3) Densities
+            calculateDensities(start, end);
+            _barrier->arrive_and_wait();
+
+            // 4) Pressure
             calculatePressureForce(dt, start, end);
 
             if (_useViscosity) {
-                rendezvous.arrive_and_wait();
+                _barrier->arrive_and_wait();
 
-                for (auto particleIt = start; particleIt != end; ++particleIt) {
-                    uint32_t i = particleIt - _particles.begin();
+                for (auto it = start; it != end; ++it) {
+                    uint32_t i = it - _particles.begin();
                     _velocitySnapshot[i] = _particles[i]._velocity;
                 }
 
-                rendezvous.arrive_and_wait();
+                _barrier->arrive_and_wait();
                 calculateViscosity(dt, start, end);
             }
 
-            rendezvous.arrive_and_wait();
+            _barrier->arrive_and_wait();
 
+            // 5) Final integration
             updatePositions(dt, start, end);
-            rendezvous.arrive_and_wait();
+            _barrier->arrive_and_wait();
         });
     }
 
-    for (auto& thread : _threads) {
+    for (auto& thread : _threads)
         thread.join();
-    }
 }
 
 void SPH::applyExternalForces(float dt, const auto start, const auto end)

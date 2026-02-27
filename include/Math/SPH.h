@@ -2,6 +2,8 @@
 #define SPH_H
 
 #include "Particle.h"
+
+#include <barrier>
 #include <thread>
 #include <vector>
 
@@ -34,10 +36,17 @@ public:
      */
     void init(SPHConfig config = {}, const std::vector<Particle>& particles = {});
 
+    /** Destructor for the SPH simulation, responsible for cleaning up resources and stopping worker
+     * threads.
+     */
+    ~SPH();
+
     /** Step the simulation forward by a given time delta.
      * @param dt The time step to advance the simulation.
      */
     void step(float dt);
+
+    void workerLoop(size_t t);
 
     /** Update the simulation configuration parameters.
      * @param config The new configuration to apply to the simulation.
@@ -67,8 +76,13 @@ public:
 
 private:
     SPHConfig _config;
+    float _dt = 0.0f;
     std::vector<Particle> _particles;
+
+    // Multithreading members.
     std::vector<std::thread> _threads;
+    std::unique_ptr<std::barrier<>> _barrier;
+    std::atomic<bool> _running{true};
 
     // Precomputed kernel constants (depend on smoothingRadius).
     float K_SpikyPow2 = 0.0f;
