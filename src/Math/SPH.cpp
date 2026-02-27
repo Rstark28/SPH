@@ -30,8 +30,13 @@ void SPH::init(SPHConfig config, const std::vector<Particle>& particles)
 
     const uint32_t threadCount = std::min<uint32_t>(
         std::max(1u, std::thread::hardware_concurrency()), static_cast<uint32_t>(n));
-    _threads.resize(threadCount);
+    _threads.resize(threadCount - 1);
+    _chunk = (_particles.size() + threadCount - 1) / threadCount;
     _barrier = std::make_unique<std::barrier<>>(threadCount);
+
+    for (size_t thread = 0; thread < _threads.size(); ++thread) {
+        _threads[thread] = std::thread(&SPH::threadLoop, this, thread + 1);
+    }
 
     const float smoothingRadius = _config.smoothingRadius;
     K_SpikyPow2 = 15.0f / (2.0f * PI * std::pow(smoothingRadius, 5));
@@ -42,7 +47,12 @@ void SPH::init(SPHConfig config, const std::vector<Particle>& particles)
 
 SPH::~SPH()
 {
-    _running = false;
+    if (!_threads.empty()) {
+        _running = false;
+        _barrier->arrive_and_wait();
+        for (auto& thread : _threads)
+            thread.join();
+    }
 }
 
 // Offsets for the 3x3x3 neighborhood around a cell (including the cell itself).
@@ -150,77 +160,80 @@ void SPH::resolveCollisions(Particle& particle) const
     }
 }
 
-void SPH::step(float dt)
+void SPH::step()
 {
-    const size_t threadCount = _threads.size();
-    const size_t chunk = (_particles.size() + threadCount - 1) / threadCount;
-
     _useViscosity = _config.viscosityStrength != 0.0f;
-
-    _threads.clear();
-
-    for (size_t t = 0; t < threadCount; ++t) {
-        auto start = _particles.begin() + t * chunk;
-        auto end = std::min(start + chunk, _particles.end());
-
-        _threads.emplace_back([this, start, end, dt]() {
-            // 1) External forces
-            applyExternalForces(dt, start, end);
-            _barrier->arrive_and_wait();
-
-            // 2) Spatial hash & reorder must happen once
-            if (start == _particles.begin()) {
-                buildSpatialHash();
-                reorderParticles();
-
-                std::ranges::fill(_offsets, static_cast<uint32_t>(_particles.size()));
-
-                for (uint32_t i = 0; i < _offsets.size(); ++i) {
-                    const uint32_t k = _keys[i];
-                    if (_offsets[k] > i)
-                        _offsets[k] = i;
-                }
-            }
-
-            _barrier->arrive_and_wait();
-
-            // 3) Densities
-            calculateDensities(start, end);
-            _barrier->arrive_and_wait();
-
-            // 4) Pressure
-            calculatePressureForce(dt, start, end);
-
-            if (_useViscosity) {
-                _barrier->arrive_and_wait();
-
-                for (auto it = start; it != end; ++it) {
-                    uint32_t i = it - _particles.begin();
-                    _velocitySnapshot[i] = _particles[i]._velocity;
-                }
-
-                _barrier->arrive_and_wait();
-                calculateViscosity(dt, start, end);
-            }
-
-            _barrier->arrive_and_wait();
-
-            // 5) Final integration
-            updatePositions(dt, start, end);
-            _barrier->arrive_and_wait();
-        });
-    }
-
-    for (auto& thread : _threads)
-        thread.join();
+    threadStep(0);
 }
 
-void SPH::applyExternalForces(float dt, const auto start, const auto end)
+void SPH::threadLoop(const size_t thread)
+{
+    while (true) {
+        threadStep(thread);
+        if (!_running)
+            break;
+    }
+}
+
+void SPH::threadStep(const size_t thread)
+{
+    _barrier->arrive_and_wait();
+    if (!_running)
+        return;
+
+    const auto start = _particles.begin() + thread * _chunk;
+    const auto end = std::min(start + _chunk, _particles.end());
+
+    // 1) External forces
+    applyExternalForces(start, end);
+    _barrier->arrive_and_wait();
+
+    // 2) Spatial hash & reorder must happen once
+    if (thread == 0) {
+        buildSpatialHash();
+        reorderParticles();
+
+        std::ranges::fill(_offsets, static_cast<uint32_t>(_particles.size()));
+
+        for (uint32_t i = 0; i < _offsets.size(); ++i) {
+            if (const uint32_t k = _keys[i]; _offsets[k] > i)
+                _offsets[k] = i;
+        }
+    }
+
+    _barrier->arrive_and_wait();
+
+    // 3) Densities
+    calculateDensities(start, end);
+    _barrier->arrive_and_wait();
+
+    // 4) Pressure
+    calculatePressureForce(start, end);
+
+    if (_useViscosity) {
+        _barrier->arrive_and_wait();
+
+        for (auto it = start; it != end; ++it) {
+            uint32_t i = it - _particles.begin();
+            _velocitySnapshot[i] = _particles[i]._velocity;
+        }
+
+        calculateViscosity(start, end);
+    }
+
+    _barrier->arrive_and_wait();
+
+    // 5) Final integration
+    updatePositions(start, end);
+    _barrier->arrive_and_wait();
+}
+
+void SPH::applyExternalForces(const auto start, const auto end)
 {
     for (auto particleIt = start; particleIt != end; ++particleIt) {
         auto& particle = *particleIt;
-        particle._velocity[1] += _config.gravity * dt;
-        particle._predicted = particle._position + particle._velocity * dt;
+        particle._velocity[1] += _config.gravity * _dt;
+        particle._predicted = particle._position + particle._velocity * _dt;
     }
 }
 
@@ -279,7 +292,7 @@ void SPH::calculateDensities(const auto start, const auto end)
     }
 }
 
-void SPH::calculatePressureForce(const float dt, const auto start, const auto end)
+void SPH::calculatePressureForce(const auto start, const auto end)
 {
     const float squareRadius = std::pow(_config.smoothingRadius, 2.0f);
 
@@ -328,21 +341,21 @@ void SPH::calculatePressureForce(const float dt, const auto start, const auto en
         }
 
         const auto acceleration = pressureForce * (1.0f / std::max(1e-6f, particle._density));
-        particle._velocity += acceleration * dt;
+        particle._velocity += acceleration * _dt;
 
         // Airborne drag
         if (neighborCount < 8) {
-            particle._velocity -= particle._velocity * dt * 0.75f;
+            particle._velocity -= particle._velocity * _dt * 0.75f;
         }
     }
 }
 
-void SPH::calculateViscosity(const float dt, const auto start, const auto end)
+void SPH::calculateViscosity(const auto start, const auto end)
 {
     const float squareRadius = std::pow(_config.smoothingRadius, 2.0f);
 
     for (auto particleIt = start; particleIt != end; ++particleIt) {
-        uint32_t id = particleIt - _particles.begin();
+        const uint32_t id = particleIt - _particles.begin();
         auto& particle = *particleIt;
         const auto originCell = getCell(particle);
         Vec3<float> viscosityForce {};
@@ -358,9 +371,9 @@ void SPH::calculateViscosity(const float dt, const auto start, const auto end)
 
                 if (auto& neighbor = _particles[neighborIndex]; neighbor != particle) {
                     const auto distanceToNeighbor = neighbor._predicted - particle._predicted;
-                    const float squareDistance = distanceToNeighbor * distanceToNeighbor;
 
-                    if (squareDistance <= squareRadius) {
+                    if (const float squareDistance = distanceToNeighbor * distanceToNeighbor;
+                        squareDistance <= squareRadius) {
                         const float distance = std::sqrt(squareDistance);
                         viscosityForce += (_velocitySnapshot[neighborIndex] - velocity)
                             * poly6Kernel(distance);
@@ -369,15 +382,15 @@ void SPH::calculateViscosity(const float dt, const auto start, const auto end)
             }
         }
 
-        _particles[id]._velocity += viscosityForce * _config.viscosityStrength * dt;
+        _particles[id]._velocity += viscosityForce * _config.viscosityStrength * _dt;
     }
 }
 
-void SPH::updatePositions(const float dt, const auto start, const auto end)
+void SPH::updatePositions(const auto start, const auto end)
 {
     for (auto particleIt = start; particleIt != end; ++particleIt) {
         auto& particle = *particleIt;
-        particle._position += particle._velocity * dt;
+        particle._position += particle._velocity * _dt;
         resolveCollisions(particle);
     }
 }

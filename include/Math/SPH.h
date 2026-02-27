@@ -44,9 +44,7 @@ public:
     /** Step the simulation forward by a given time delta.
      * @param dt The time step to advance the simulation.
      */
-    void step(float dt);
-
-    void workerLoop(size_t t);
+    void step();
 
     /** Update the simulation configuration parameters.
      * @param config The new configuration to apply to the simulation.
@@ -76,13 +74,14 @@ public:
 
 private:
     SPHConfig _config;
-    float _dt = 0.0f;
+    float _dt = 1 / 60.0f;
     std::vector<Particle> _particles;
 
     // Multithreading members.
     std::vector<std::thread> _threads;
     std::unique_ptr<std::barrier<>> _barrier;
-    std::atomic<bool> _running{true};
+    std::atomic<bool> _running { true };
+    size_t _chunk;
 
     // Precomputed kernel constants (depend on smoothingRadius).
     float K_SpikyPow2 = 0.0f;
@@ -91,6 +90,23 @@ private:
     float K_SpikyPow3Grad = 0.0f;
 
     explicit SPH() = default;
+
+    /**
+     * Main function executed by each worker thread to perform a simulation step. This function will
+     * synchronize with other threads using a barrier to ensure all threads are at the same point in
+     * the simulation before proceeding to the next step.
+     * @param thread The index of the thread to determine which portion of the particle list to
+     * process.
+     */
+    void threadStep(size_t thread);
+
+    /**
+     * Keeps the worker thread running in a loop, continuously performing simulation steps until the
+     * simulation is stopped.
+     * @param thread The index of the thread to determine which portion of the particle list to
+     * process.
+     */
+    void threadLoop(size_t thread);
 
     // Kernel functions used for density/pressure/viscosity.
     [[nodiscard]] float densityKernel(float dst) const;
@@ -113,11 +129,10 @@ private:
     void resolveCollisions(Particle& particle) const;
 
     /** Apply gravity to the particles and predict their new positions.
-     * @param dt The time step to use for the force application and prediction.
      * @param start An iterator pointing to the start of the particle range to process.
      * @param end An iterator pointing to the end of the particle range to process.
      */
-    void applyExternalForces(float dt, auto start, auto end);
+    void applyExternalForces(auto start, auto end);
 
     /** Build the spatial hash for efficient neighbor searching. This involves:
      */
@@ -137,28 +152,25 @@ private:
 
     /** Calculate the pressure force for each particle based on its density and the densities of its
      * neighbors.
-     * @param dt The time step to use for updating velocities based on the calculated forces.
      * @param start An iterator pointing to the start of the particle range to process.
      * @param end An iterator pointing to the end of the particle range to process.
      */
-    void calculatePressureForce(float dt, auto start, auto end);
+    void calculatePressureForce(auto start, auto end);
 
     /** Calculate the viscosity force for each particle based on the velocities of its neighbors.
      * @param velocitySnapshot A snapshot of the particle velocities to use for calculating
      * viscosity forces.
-     * @param dt The time step to use for updating velocities based on the calculated forces.
      * @param start An iterator pointing to the start of the particle range to process.
      * @param end An iterator pointing to the end of the particle range to process.
      */
-    void calculateViscosity(float dt, auto start, auto end);
+    void calculateViscosity(auto start, auto end);
 
     /** Update the positions of the particles based on their velocities and resolve any collisions
      * with the bounds.
-     * @param dt The time step to use for updating positions.
      * @param start An iterator pointing to the start of the particle range to process.
      * @param end An iterator pointing to the end of the particle range to process.
      */
-    void updatePositions(float dt, auto start, auto end);
+    void updatePositions(auto start, auto end);
 
     // Working buffers to avoid reallocating every step.
     std::vector<uint32_t> _keys;

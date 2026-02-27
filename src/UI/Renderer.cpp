@@ -131,7 +131,7 @@ void Renderer::draw()
 
     // Draw particles
     SPH& sph = SPH::getInstance();
-    sph.step(1 / 60.0f);
+    sph.step();
     const auto& particles = sph.particles();
     for (const auto& particle : particles) {
         particle.draw();
@@ -139,11 +139,9 @@ void Renderer::draw()
 
     // Refresh box mesh if bounds changed
     const SPHConfig& config = sph.config();
-    const Vec3<float>& targetHalfSize = config.bounds;
-    const Vec3<float> diff = config.bounds - _boxHalfSize;
-    if (std::abs(diff[0]) > 1e-4f || std::abs(diff[1]) > 1e-4f || std::abs(diff[2]) > 1e-4f) {
-        _boxHalfSize = targetHalfSize;
-        _boxMesh = MeshFactory::createBox(_boxHalfSize);
+    if (const auto diff = config.bounds - _boxHalfSize;
+        std::abs(diff[0]) > 1e-4f || std::abs(diff[1]) > 1e-4f || std::abs(diff[2]) > 1e-4f) {
+        _boxMesh = MeshFactory::createBox(config.bounds);
     }
 
     // Draw the box wireframe
