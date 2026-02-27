@@ -11,18 +11,18 @@
 #include <stdexcept>
 
 /*
- * A simple fixed-size Vec3tor class for basic mathematical operations.
+ * A simple fixed-size Vector class for basic mathematical operations.
  * Supports addition, subtraction, scalar multiplication/division, dot product, and normalization.
- * The dimension of the Vec3tor is specified as a template parameter.
+ * The dimension of the Vector is specified as a template parameter.
  */
 template <typename T> struct Vec3 {
     T _data[3];
 
-    Vec3() = default;
+    constexpr Vec3() = default;
 
-    Vec3(std::initializer_list<T> list) noexcept
+    constexpr Vec3(T x, T y, T z)
+        : _data { x, y, z }
     {
-        std::copy_n(list.begin(), std::min(list.size(), static_cast<size_t>(3)), _data);
     }
 
     Vec3(const Vec3& v) = default;
