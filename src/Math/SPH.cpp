@@ -196,7 +196,7 @@ void SPH::step(float dt)
                 }
 
                 rendezvous.arrive_and_wait();
-                calculateViscosity(_velocitySnapshot, dt, start, end);
+                calculateViscosity(dt, start, end);
             }
 
             rendezvous.arrive_and_wait();
@@ -333,8 +333,7 @@ void SPH::calculatePressureForce(const float dt, const auto start, const auto en
     }
 }
 
-void SPH::calculateViscosity(const std::vector<Vec3<float>>& velocitySnapshot, const float dt,
-    const auto start, const auto end)
+void SPH::calculateViscosity(const float dt, const auto start, const auto end)
 {
     const float squareRadius = std::pow(_config.smoothingRadius, 2.0f);
 
@@ -343,10 +342,10 @@ void SPH::calculateViscosity(const std::vector<Vec3<float>>& velocitySnapshot, c
         auto& particle = *particleIt;
         const auto originCell = getCell(particle);
         Vec3<float> viscosityForce {};
-        const auto velocity = velocitySnapshot[id];
+        const auto velocity = _velocitySnapshot[id];
 
         for (const auto offset : OFFSETS_3D) {
-            Vec3<int> cell = originCell + offset;
+            const auto cell = originCell + offset;
             const uint32_t key = keyFromHash(hash(cell));
             uint32_t neighborIndex = _offsets[key];
 
@@ -359,8 +358,8 @@ void SPH::calculateViscosity(const std::vector<Vec3<float>>& velocitySnapshot, c
 
                     if (squareDistance <= squareRadius) {
                         const float distance = std::sqrt(squareDistance);
-                        viscosityForce
-                            += (velocitySnapshot[neighborIndex] - velocity) * poly6Kernel(distance);
+                        viscosityForce += (_velocitySnapshot[neighborIndex] - velocity)
+                            * poly6Kernel(distance);
                     }
                 }
             }

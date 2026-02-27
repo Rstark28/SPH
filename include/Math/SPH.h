@@ -136,8 +136,7 @@ private:
      * @param start An iterator pointing to the start of the particle range to process.
      * @param end An iterator pointing to the end of the particle range to process.
      */
-    void calculateViscosity(
-        const std::vector<Vec3<float>>& velocitySnapshot, float dt, auto start, auto end);
+    void calculateViscosity(float dt, auto start, auto end);
 
     /** Update the positions of the particles based on their velocities and resolve any collisions
      * with the bounds.
