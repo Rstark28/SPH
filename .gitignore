@@ -1,0 +1,36 @@
+# Build directories
+build/
+cmake-build-debug/
+cmake-build-release/
+out/
+bin/
+lib/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.clang-format
+
+# CMake
+CMakeLists.txt.user
+CMakeUserPresets.json
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Compiled binaries
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# Dependencies
+/external/glfw/
+/external/glew/
+
